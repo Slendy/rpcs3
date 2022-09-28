@@ -21,19 +21,19 @@ void lv2_socket_raw::save(utils::serial& ar)
 
 std::tuple<bool, s32, std::shared_ptr<lv2_socket>, sys_net_sockaddr> lv2_socket_raw::accept([[maybe_unused]] bool is_lock)
 {
-	sys_net.fatal("[RAW] accept() called on a RAW socket");
+	sys_net.todo("[RAW] accept() called on a RAW socket");
 	return {};
 }
 
 std::optional<s32> lv2_socket_raw::connect([[maybe_unused]] const sys_net_sockaddr& addr)
 {
-	sys_net.fatal("[RAW] connect() called on a RAW socket");
+	sys_net.todo("[RAW] connect() called on a RAW socket");
 	return CELL_OK;
 }
 
 s32 lv2_socket_raw::connect_followup()
 {
-	sys_net.fatal("[RAW] connect_followup() called on a RAW socket");
+	sys_net.todo("[RAW] connect_followup() called on a RAW socket");
 	return CELL_OK;
 }
 
