@@ -867,11 +867,11 @@ namespace np
 		return true;
 	}
 
-	bool np_handler::reply_store_score_data(u32 req_id, std::vector<u8>& reply_data)
+	bool np_handler::reply_store_score_data(u32 /* req_id */, std::vector<u8>& /* reply_data */)
 	{
 		return true;
 	}
-	bool np_handler::reply_get_score_data(u32 req_id, std::vector<u8>& reply_data)
+	bool np_handler::reply_get_score_data(u32 /* req_id */, std::vector<u8>& /* reply_data */)
 	{
 		return true;
 	}
@@ -999,7 +999,11 @@ namespace np
 		lastSortDate->tick = resp->lastSortDate();
 		*totalRecord       = resp->totalRecord();
 
-		trans_ctx->result = not_an_error(fb_rankarray->size());
+		if (fb_rankarray->size())
+			trans_ctx->result = not_an_error(fb_rankarray->size());
+		else
+			trans_ctx->result = SCE_NP_COMMUNITY_SERVER_ERROR_GAME_RANKING_NOT_FOUND;
+
 		trans_ctx->wake_cond.notify_one();
 		return true;
 	}
@@ -1008,7 +1012,7 @@ namespace np
 		return handle_GetScoreResponse(req_id, reply_data);
 	}
 
-	void np_handler::get_score_friend(std::shared_ptr<score_transaction_ctx>& trans_ctx, SceNpScoreBoardId boardId, vm::ptr<SceNpScoreRankData> rankArray, [[maybe_unused]] u64 rankArraySize, vm::ptr<SceNpScoreComment> commentArray, [[maybe_unused]] u64 commentArraySize, vm::ptr<void> infoArray, u64 infoArraySize, u64 arrayNum, vm::ptr<CellRtcTick> lastSortDate, vm::ptr<SceNpScoreRankNumber> totalRecord, bool async)
+	void np_handler::get_score_friend(std::shared_ptr<score_transaction_ctx>& trans_ctx, SceNpScoreBoardId boardId, bool include_self, vm::ptr<SceNpScoreRankData> rankArray, [[maybe_unused]] u64 rankArraySize, vm::ptr<SceNpScoreComment> commentArray, [[maybe_unused]] u64 commentArraySize, vm::ptr<void> infoArray, u64 infoArraySize, u64 arrayNum, vm::ptr<CellRtcTick> lastSortDate, vm::ptr<SceNpScoreRankNumber> totalRecord, bool async)
 	{
 		std::unique_lock lock(trans_ctx->mutex);
 		u32 req_id = get_req_id(0x3334);
@@ -1024,7 +1028,7 @@ namespace np
 		bool with_comments = !!commentArray;
 		bool with_gameinfo = !!infoArray;
 
-		rpcn->get_score_friend(req_id, trans_ctx->communicationId, boardId, with_comments, with_gameinfo);
+		rpcn->get_score_friend(req_id, trans_ctx->communicationId, boardId, include_self, with_comments, with_gameinfo, arrayNum);
 
 		return score_async_handler(std::move(lock), trans_ctx, req_id, async);
 	}
