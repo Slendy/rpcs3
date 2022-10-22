@@ -6629,17 +6629,19 @@ public:
 
 			if (auto ci = llvm::dyn_cast<llvm::ConstantInt>(trunc<u8>(val).eval(m_ir)))
 			{
-				if (g_cfg.core.spu_accurate_dma)
+				if (g_cfg.core.mfc_debug)
 				{
 					break;
 				}
+
+				bool must_use_cpp_functions = !!g_cfg.core.spu_accurate_dma;
 
 				if (u64 cmdh = ci->getZExtValue() & ~(MFC_BARRIER_MASK | MFC_FENCE_MASK | MFC_RESULT_MASK); g_cfg.core.rsx_fifo_accuracy || g_cfg.video.strict_rendering_mode || !g_use_rtm)
 				{
 					// TODO: don't require TSX (current implementation is TSX-only)
 					if (cmdh == MFC_PUT_CMD || cmdh == MFC_SNDSIG_CMD)
 					{
-						break;
+						must_use_cpp_functions = true;
 					}
 				}
 
@@ -6739,12 +6741,16 @@ public:
 					m_ir->CreateCondBr(cond, exec, fail, m_md_likely);
 					m_ir->SetInsertPoint(exec);
 
-					const auto mmio = llvm::BasicBlock::Create(m_context, "", m_function);
 					const auto copy = llvm::BasicBlock::Create(m_context, "", m_function);
 
 					// Always use interpreter function for MFC debug option
-					m_ir->CreateCondBr(m_ir->CreateICmpUGE(eal.value, m_ir->getInt32(g_cfg.core.mfc_debug ? 0 : 0xe0000000)), mmio, copy, m_md_unlikely);
-					m_ir->SetInsertPoint(mmio);
+					if (!must_use_cpp_functions)
+					{
+						const auto mmio = llvm::BasicBlock::Create(m_context, "", m_function);
+						m_ir->CreateCondBr(m_ir->CreateICmpUGE(eal.value, m_ir->getInt32(0xe0000000)), mmio, copy, m_md_unlikely);
+						m_ir->SetInsertPoint(mmio);
+					}
+
 					m_ir->CreateStore(ci, spu_ptr<u8>(&spu_thread::ch_mfc_cmd, &spu_mfc_cmd::cmd));
 					call("spu_exec_mfc_cmd", &exec_mfc_cmd, m_thread);
 					m_ir->CreateBr(next);
@@ -8313,13 +8319,13 @@ public:
 				{
 					if (perm_only)
 					{
-						set_vr(op.rt4, vperm2b256to128(as, bs, c));
+						set_vr(op.rt4, vperm2b(as, bs, c));
 						return;
 					}
 
 					const auto m = gf2p8affineqb(c, build<u8[16]>(0x40, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x40, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20), 0x7f);
 					const auto mm = select(noncast<s8[16]>(m) >= 0, splat<u8[16]>(0), m);
-					const auto ab = vperm2b256to128(as, bs, c);
+					const auto ab = vperm2b(as, bs, c);
 					set_vr(op.rt4, select(noncast<s8[16]>(c) >= 0, ab, mm));
 					return;
 				}
@@ -8371,18 +8377,18 @@ public:
 			}
 		}
 
-		if (m_use_avx512_icl && (op.ra != op.rb))
+		if (m_use_avx512_icl && (op.ra != op.rb || m_interp_magn))
 		{
 			if (perm_only)
 			{
-				set_vr(op.rt4, vperm2b256to128(a, b, eval(c ^ 0xf)));
+				set_vr(op.rt4, vperm2b(a, b, eval(c ^ 0xf)));
 				return;
 			}
 
 			const auto m = gf2p8affineqb(c, build<u8[16]>(0x40, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x40, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20), 0x7f);
 			const auto mm = select(noncast<s8[16]>(m) >= 0, splat<u8[16]>(0), m);
 			const auto cr = eval(c ^ 0xf);
-			const auto ab = vperm2b256to128(a, b, cr);
+			const auto ab = vperm2b(a, b, cr);
 			set_vr(op.rt4, select(noncast<s8[16]>(c) >= 0, ab, mm));
 			return;
 		}

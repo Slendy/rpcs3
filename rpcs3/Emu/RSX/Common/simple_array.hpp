@@ -1,6 +1,7 @@
 #pragma once
 
 #include <util/types.hpp>
+#include <functional>
 
 namespace rsx
 {
@@ -281,6 +282,36 @@ namespace rsx
 		const_iterator end() const
 		{
 			return _data ? _data + _size : nullptr;
+		}
+
+		bool any(std::predicate<const Ty&> auto predicate) const
+		{
+			for (auto it = begin(); it != end(); ++it)
+			{
+				if (std::invoke(predicate, *it))
+				{
+					return true;
+				}
+			}
+			return false;
+		}
+
+		void filter(std::predicate<const Ty&> auto predicate)
+		{
+			if (!_size)
+			{
+				return;
+			}
+
+			for (auto ptr = _data, last = _data + _size - 1; ptr < last; ptr++)
+			{
+				if (!predicate(*ptr))
+				{
+					// Move item to the end of the list and shrink by 1
+					std::memcpy(ptr, last, sizeof(Ty));
+					last = _data + (--_size);
+				}
+			}
 		}
 	};
 }

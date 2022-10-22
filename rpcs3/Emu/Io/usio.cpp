@@ -80,8 +80,9 @@ usb_device_usio::usb_device_usio(const std::array<u8, 7>& location)
 			.bInterval        = 16}));
 
 	g_fxo->get<usio_memory>().backup_memory.resize(0xB8);
+	g_fxo->get<usio_memory>().last_game_status.clear();
 	g_fxo->get<usio_memory>().last_game_status.resize(0x28);
-	load_backup(rpcs3::utils::get_hdd1_dir() + "/caches/usiobackup.bin");
+	load_backup();
 }
 
 usb_device_usio::~usb_device_usio()
@@ -105,27 +106,26 @@ void usb_device_usio::control_transfer(u8 bmRequestType, u8 bRequest, u16 wValue
 
 extern bool is_input_allowed();
 
-void usb_device_usio::load_backup(const std::string& path)
+void usb_device_usio::load_backup()
 {
-	usio_backup_file.open(path, fs::create + fs::read + fs::write + fs::lock);
+	usio_backup_path = rpcs3::utils::get_hdd1_dir() + "/caches/usiobackup.bin";
 
-	if (!usio_backup_file)
+	if (!usio_backup_file.open(usio_backup_path, fs::read + fs::write + fs::lock))
 	{
-		usio_log.error("Failed to load the USIO Backup file: %s", path);
+		usio_log.trace("Failed to load the USIO Backup file: %s", usio_backup_path);
 		return;
 	}
 
-	const u64 file_size = g_fxo->get<usio_memory>().backup_memory.size() + g_fxo->get<usio_memory>().last_game_status.size();
+	const u64 file_size = g_fxo->get<usio_memory>().backup_memory.size();
 
 	if (usio_backup_file.size() != file_size)
 	{
-		usio_log.notice("Invalid USIO Backup file detected. Treating it as an empty file: %s", path);
+		usio_log.trace("Invalid USIO Backup file detected. Treating it as an empty file: %s", usio_backup_path);
 		usio_backup_file.trunc(file_size);
 		return;
 	}
 
 	usio_backup_file.read(g_fxo->get<usio_memory>().backup_memory.data(), g_fxo->get<usio_memory>().backup_memory.size());
-	usio_backup_file.read(g_fxo->get<usio_memory>().last_game_status.data(), g_fxo->get<usio_memory>().last_game_status.size());
 }
 
 void usb_device_usio::save_backup()
@@ -137,7 +137,6 @@ void usb_device_usio::save_backup()
 
 	usio_backup_file.seek(0, fs::seek_set);
 	usio_backup_file.write(g_fxo->get<usio_memory>().backup_memory.data(), g_fxo->get<usio_memory>().backup_memory.size());
-	usio_backup_file.write(g_fxo->get<usio_memory>().last_game_status.data(), g_fxo->get<usio_memory>().last_game_status.size());
 }
 
 void usb_device_usio::translate_input()
@@ -146,8 +145,9 @@ void usb_device_usio::translate_input()
 	const auto handler = pad::get_current_handler();
 
 	std::vector<u8> input_buf = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x07, 0x00, 0x00, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x60, 0x00, 0x60, 0x00, 0x60, 0x00, 0x60, 0x00, 0x60, 0x00, 0x60, 0x00, 0x60, 0x00, 0x60, 0x00, 0x60, 0x00, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
-	constexpr le_t<u16> c_small_hit = 0x4A0;
-	constexpr le_t<u16> c_big_hit = 0xA40;
+	constexpr le_t<u16> c_small_hit = 0x4D0;
+	constexpr le_t<u16> c_big_hit = 0x1800;
+	le_t<u16> test_keys = 0x0000;
 
 	auto translate_from_pad = [&](u8 pad_number, u8 player)
 	{
@@ -166,9 +166,50 @@ void usb_device_usio::translate_input()
 
 		for (const Button& button : pad->m_buttons)
 		{
-			if (button.m_pressed)
+			switch (button.m_offset)
 			{
-				if (button.m_offset == CELL_PAD_BTN_OFFSET_DIGITAL2)
+			case CELL_PAD_BTN_OFFSET_DIGITAL1:
+				if (player == 0)
+				{
+					switch (button.m_outKeyCode)
+					{
+					case CELL_PAD_CTRL_SELECT:
+						if (button.m_pressed && !test_key_pressed) // Solve the need to hold the Test key
+							test_on = !test_on;
+						test_key_pressed = button.m_pressed;
+						break;
+					case CELL_PAD_CTRL_LEFT:
+						if (button.m_pressed && !coin_key_pressed) // Ensure only one coin is inserted each time the Coin key is pressed
+							coin_counter++;
+						coin_key_pressed = button.m_pressed;
+						break;
+					default:
+						if (button.m_pressed)
+						{
+							switch (button.m_outKeyCode)
+							{
+							case CELL_PAD_CTRL_START:
+								test_keys |= 0x200; // Enter
+								break;
+							case CELL_PAD_CTRL_UP:
+								test_keys |= 0x2000; // Up
+								break;
+							case CELL_PAD_CTRL_DOWN:
+								test_keys |= 0x1000; // Down
+								break;
+							case CELL_PAD_CTRL_RIGHT:
+								test_keys |= 0x4000; // Service
+								break;
+							default:
+								break;
+							}
+						}
+						break;
+					}
+				}
+				break;
+			case CELL_PAD_BTN_OFFSET_DIGITAL2:
+				if (button.m_pressed)
 				{
 					switch (button.m_outKeyCode)
 					{
@@ -208,6 +249,9 @@ void usb_device_usio::translate_input()
 						break;
 					}
 				}
+				break;
+			default:
+				break;
 			}
 		}
 	};
@@ -215,16 +259,20 @@ void usb_device_usio::translate_input()
 	translate_from_pad(0, 0);
 	translate_from_pad(1, 1);
 
+	test_keys |= test_on ? 0x80 : 0x00;
+	std::memcpy(input_buf.data(), &test_keys, sizeof(u16));
+	std::memcpy(input_buf.data() + 16, &coin_counter, sizeof(u16));
+
 	q_replies.push(input_buf);
 	q_replies.push({0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00});
 }
 
 void usb_device_usio::usio_write(u8 channel, u16 reg, const std::vector<u8>& data)
 {
-	auto write_memory = [&](std::vector<u8>& memory)
+	auto write_memory = [&](std::vector<u8>& memory, bool exact_size = true)
 	{
-		ensure(data.size() == memory.size());
-		memcpy(memory.data(), data.data(), memory.size());
+		ensure(data.size() == memory.size() || (data.size() <= memory.size() && !exact_size));
+		memcpy(memory.data(), data.data(), data.size());
 	};
 
 	const auto get_u16 = [&](std::string_view usio_func) -> u16
@@ -289,7 +337,7 @@ void usb_device_usio::usio_write(u8 channel, u16 reg, const std::vector<u8>& dat
 			{
 			case 0x0000:
 			{
-				write_memory(g_fxo->get<usio_memory>().backup_memory);
+				write_memory(g_fxo->get<usio_memory>().backup_memory, false);
 				break;
 			}
 			case 0x0180:
@@ -320,6 +368,20 @@ void usb_device_usio::usio_read(u8 channel, u16 reg, u16 size)
 			u16 to_push = std::min(left, static_cast<u16>(64));
 			zeroes.resize(to_push);
 			q_replies.push(zeroes);
+			left -= to_push;
+		}
+	};
+
+	auto push_vector = [&](std::vector<u8>& memory)
+	{
+		std::vector<u8> buffer;
+		u16 left = size;
+		while (left > 0)
+		{
+			u16 to_push = std::min(left, static_cast<u16>(64));
+			buffer.resize(to_push);
+			memcpy(buffer.data(), memory.data() + (size - left), buffer.size());
+			q_replies.push(buffer);
 			left -= to_push;
 		}
 	};
@@ -389,20 +451,14 @@ void usb_device_usio::usio_read(u8 channel, u16 reg, u16 size)
 			{
 			case 0x0000:
 			{
-				ensure(size == 0xB8);
-				std::vector<u8> buffer[3];
-				for (int i = 0; i < 3; i++)
-				{
-					buffer[i].resize(i < 2 ? 64 : 56);
-					memcpy(buffer[i].data(), g_fxo->get<usio_memory>().backup_memory.data() + i * 64, buffer[i].size());
-					q_replies.push(buffer[i]);
-				}
+				ensure(size <= 0xB8);
+				push_vector(g_fxo->get<usio_memory>().backup_memory);
 				break;
 			}
 			case 0x0180:
 			{
 				ensure(size == 0x28);
-				q_replies.push(g_fxo->get<usio_memory>().last_game_status);
+				push_vector(g_fxo->get<usio_memory>().last_game_status);
 				break;
 			}
 			case 0x0200:
@@ -457,6 +513,11 @@ void usb_device_usio::interrupt_transfer(u32 buf_size, u8* buf, u32 endpoint, Us
 	transfer->expected_result = HC_CC_NOERR;
 	// The latency varies per operation but it doesn't seem to matter for this device so let's go fast!
 	transfer->expected_time = get_timestamp();
+
+	if (!usio_backup_path.empty() && !usio_backup_file && !usio_backup_file.open(usio_backup_path, fs::create + fs::read + fs::write + fs::lock))
+	{
+		usio_log.error("Failed to create a new USIO Backup file: %s", usio_backup_path);
+	}
 
 	switch (endpoint)
 	{

@@ -678,12 +678,18 @@ game_boot_result Emulator::BootGame(const std::string& path, const std::string& 
 
 		if (g_cfg.savestate.suspend_emu && m_ar)
 		{
-			std::string old_path = path.substr(0, path.find_last_not_of(fs::delim));
-			old_path.insert(old_path.find_last_of(fs::delim) + 1, "old-"sv);
+			std::string old_path = path.substr(0, path.find_last_not_of(fs::delim) + 1);
+			const usz insert_pos = old_path.find_last_of(fs::delim) + 1;
+			const auto prefix = "used_"sv;
 
-			if (fs::rename(path, old_path, true))
+			if (old_path.compare(insert_pos, prefix.size(), prefix) != 0)
 			{
-				sys_log.notice("Savestate has been moved to path='%s'", old_path);
+				old_path.insert(insert_pos, prefix);
+
+				if (fs::rename(path, old_path, true))
+				{
+					sys_log.notice("Savestate has been moved to path='%s'", old_path);
+				}
 			}
 		}
 
@@ -2222,7 +2228,7 @@ void Emulator::GracefulShutdown(bool allow_autoexit, bool async_op, bool savesta
 }
 
 extern bool try_lock_vdec_context_creation();
-extern bool try_lock_spu_threads_in_a_state_compatible_with_savestates();
+extern bool try_lock_spu_threads_in_a_state_compatible_with_savestates(bool revert_lock = false);
 
 std::shared_ptr<utils::serial> Emulator::Kill(bool allow_autoexit, bool savestate)
 {
@@ -2235,6 +2241,8 @@ std::shared_ptr<utils::serial> Emulator::Kill(bool allow_autoexit, bool savestat
 
 	if (savestate && !try_lock_vdec_context_creation())
 	{
+		try_lock_spu_threads_in_a_state_compatible_with_savestates(true);
+
 		sys_log.error("Failed to savestate: HLE VDEC (video decoder) context(s) exist."
 			"\nLLE libvdec.sprx by selecting it in Adavcned tab -> Firmware Libraries."
 			"\nYou need to close the game for to take effect."
@@ -2280,7 +2288,7 @@ std::shared_ptr<utils::serial> Emulator::Kill(bool allow_autoexit, bool savestat
 
 	named_thread stop_watchdog("Stop Watchdog", [&]()
 	{
-		for (uint i = 0; thread_ctrl::state() != thread_state::aborting;)
+		for (int i = 0; thread_ctrl::state() != thread_state::aborting;)
 		{
 			// We don't need accurate timekeeping, using clocks may interfere with debugging
 			if (i >= (savestate ? 2000 : 1000))
@@ -2306,23 +2314,7 @@ std::shared_ptr<utils::serial> Emulator::Kill(bool allow_autoexit, bool savestat
 	if (auto thr = g_fxo->try_get<named_thread<rsx::rsx_replay_thread>>())
 	{
 		sys_log.notice("Stopping RSX replay thread...");
-		thr->state += cpu_flag::stop;
-
-		// Wait for a couple of seconds
-		for (int i = 0; *thr <= thread_state::aborting && i < 300; i++)
-		{
-			std::this_thread::sleep_for(10ms);
-			process_qt_events();
-		}
-
-		if (*thr <= thread_state::aborting)
-		{
-			sys_log.error("Failed to stop RSX replay thread in time.");
-		}
-		else
-		{
-			sys_log.notice("RSX replay thread stopped");
-		}
+		*thr = thread_state::finished;
 	}
 
 	if (auto rsx = g_fxo->try_get<rsx::thread>())
@@ -2539,14 +2531,29 @@ std::shared_ptr<utils::serial> Emulator::Kill(bool allow_autoexit, bool savestat
 		else
 		{
 			std::string old_path = path.substr(0, path.find_last_not_of(fs::delim));
-			old_path.insert(old_path.find_last_of(fs::delim) + 1, "old-"sv);
+			std::string old_path2 = old_path;
+
+			old_path2.insert(old_path.find_last_of(fs::delim) + 1, "old-"sv);
+			old_path.insert(old_path.find_last_of(fs::delim) + 1, "used_"sv);
 
 			if (fs::remove_file(old_path))
 			{
 				sys_log.success("Old savestate has been removed: path='%s'", old_path);	
 			}
 
+			// For backwards compatibility - avoid having loose files
+			if (fs::remove_file(old_path2))
+			{
+				sys_log.success("Old savestate has been removed: path='%s'", old_path2);	
+			}
+
 			sys_log.success("Saved savestate! path='%s'", path);
+
+			if (!g_cfg.savestate.suspend_emu)
+			{
+				// Allow to reboot from GUI
+				m_path = path;
+			}
 		}
 
 		ar.set_reading_state();
@@ -2578,16 +2585,14 @@ std::shared_ptr<utils::serial> Emulator::Kill(bool allow_autoexit, bool savestat
 
 game_boot_result Emulator::Restart()
 {
-	if (m_state == system_state::stopped)
+	if (!IsStopped())
 	{
-		return game_boot_result::generic_error;
+		auto save_args = std::make_tuple(argv, envp, data, disc, klic, hdd1, m_config_mode, m_config_mode);
+
+		GracefulShutdown(false, false);
+
+		std::tie(argv, envp, data, disc, klic, hdd1, m_config_mode, m_config_mode) = std::move(save_args);
 	}
-
-	auto save_args = std::make_tuple(argv, envp, data, disc, klic, hdd1, m_config_mode, m_config_mode);
-
-	GracefulShutdown(false, false);
-
-	std::tie(argv, envp, data, disc, klic, hdd1, m_config_mode, m_config_mode) = std::move(save_args);
 
 	// Reload with prior configs.
 	if (const auto error = Load(m_title_id); error != game_boot_result::no_errors)

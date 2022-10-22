@@ -233,7 +233,7 @@ u16 PadHandlerBase::Clamp0To1023(f32 input)
 // input has to be [-1,1]. result will be [0,255]
 u16 PadHandlerBase::ConvertAxis(f32 value)
 {
-	return static_cast<u16>((value + 1.0)*(255.0 / 2.0));
+	return static_cast<u16>((value + 1.0) * (255.0 / 2.0));
 }
 
 // The DS3, (and i think xbox controllers) give a 'square-ish' type response, so that the corners will give (almost)max x/y instead of the ~30x30 from a perfect circle
@@ -300,6 +300,11 @@ bool PadHandlerBase::has_rgb() const
 	return b_has_rgb;
 }
 
+bool PadHandlerBase::has_player_led() const
+{
+	return b_has_player_led;
+}
+
 bool PadHandlerBase::has_battery() const
 {
 	return b_has_battery;
@@ -318,7 +323,7 @@ void PadHandlerBase::init_configs()
 	}
 }
 
-void PadHandlerBase::get_next_button_press(const std::string& pad_id, const pad_callback& callback, const pad_fail_callback& fail_callback, bool get_blacklist, const std::vector<std::string>& /*buttons*/)
+PadHandlerBase::connection PadHandlerBase::get_next_button_press(const std::string& pad_id, const pad_callback& callback, const pad_fail_callback& fail_callback, bool get_blacklist, const std::vector<std::string>& /*buttons*/)
 {
 	if (get_blacklist)
 		blacklist.clear();
@@ -330,12 +335,12 @@ void PadHandlerBase::get_next_button_press(const std::string& pad_id, const pad_
 	{
 		if (fail_callback)
 			fail_callback(pad_id);
-		return;
+		return status;
 	}
 
 	if (status == connection::no_data)
 	{
-		return;
+		return status;
 	}
 
 	// Get the current button values
@@ -357,8 +362,8 @@ void PadHandlerBase::get_next_button_press(const std::string& pad_id, const pad_
 		if (!get_blacklist && std::find(blacklist.begin(), blacklist.end(), keycode) != blacklist.end())
 			continue;
 
-		const bool is_trigger = get_is_left_trigger(keycode) || get_is_right_trigger(keycode);
-		const bool is_stick   = !is_trigger && (get_is_left_stick(keycode) || get_is_right_stick(keycode));
+		const bool is_trigger = get_is_left_trigger(device, keycode) || get_is_right_trigger(device, keycode);
+		const bool is_stick   = !is_trigger && (get_is_left_stick(device, keycode) || get_is_right_stick(device, keycode));
 		const bool is_button = !is_trigger && !is_stick;
 
 		if ((is_trigger && (value > m_trigger_threshold)) || (is_stick && (value > m_thumb_threshold)) || (is_button && (value > 0)))
@@ -379,19 +384,21 @@ void PadHandlerBase::get_next_button_press(const std::string& pad_id, const pad_
 	{
 		if (blacklist.empty())
 			input_log.success("%s Calibration: Blacklist is clear. No input spam detected", m_type);
-		return;
+		return status;
 	}
-
-	const auto preview_values = get_preview_values(data);
-	const auto battery_level = get_battery_level(pad_id);
 
 	if (callback)
 	{
+		const pad_preview_values preview_values = get_preview_values(data);
+		const u32 battery_level = get_battery_level(pad_id);
+
 		if (pressed_button.value > 0)
-			return callback(pressed_button.value, pressed_button.name, pad_id, battery_level, preview_values);
+			callback(pressed_button.value, pressed_button.name, pad_id, battery_level, preview_values);
 		else
-			return callback(0, "", pad_id, battery_level, preview_values);
+			callback(0, "", pad_id, battery_level, preview_values);
 	}
+
+	return status;
 }
 
 void PadHandlerBase::get_motion_sensors(const std::string& pad_id, const motion_callback& callback, const motion_fail_callback& fail_callback, motion_preview_values preview_values, const std::array<AnalogSensor, 4>& /*sensors*/)
@@ -451,22 +458,22 @@ void PadHandlerBase::TranslateButtonPress(const std::shared_ptr<PadDevice>& devi
 		return;
 	}
 
-	if (get_is_left_trigger(keyCode))
+	if (get_is_left_trigger(device, keyCode))
 	{
 		pressed = val > (ignore_trigger_threshold ? 0 : device->config->ltriggerthreshold);
 		val = pressed ? NormalizeTriggerInput(val, device->config->ltriggerthreshold) : 0;
 	}
-	else if (get_is_right_trigger(keyCode))
+	else if (get_is_right_trigger(device, keyCode))
 	{
 		pressed = val > (ignore_trigger_threshold ? 0 : device->config->rtriggerthreshold);
 		val = pressed ? NormalizeTriggerInput(val, device->config->rtriggerthreshold) : 0;
 	}
-	else if (get_is_left_stick(keyCode))
+	else if (get_is_left_stick(device, keyCode))
 	{
 		pressed = val > (ignore_stick_threshold ? 0 : device->config->lstickdeadzone);
 		val = pressed ? NormalizeStickInput(val, device->config->lstickdeadzone, device->config->lstickmultiplier, ignore_stick_threshold) : 0;
 	}
-	else if (get_is_right_stick(keyCode))
+	else if (get_is_right_stick(device, keyCode))
 	{
 		pressed = val > (ignore_stick_threshold ? 0 : device->config->rstickdeadzone);
 		val = pressed ? NormalizeStickInput(val, device->config->rstickdeadzone, device->config->rstickmultiplier, ignore_stick_threshold) : 0;
@@ -571,11 +578,22 @@ bool PadHandlerBase::bindPadToDevice(std::shared_ptr<Pad> pad, u8 player_id)
 	return true;
 }
 
-std::array<u32, PadHandlerBase::button::button_count> PadHandlerBase::get_mapped_key_codes(const std::shared_ptr<PadDevice>& /*device*/, const cfg_pad* cfg)
+std::array<u32, PadHandlerBase::button::button_count> PadHandlerBase::get_mapped_key_codes(const std::shared_ptr<PadDevice>& device, const cfg_pad* cfg)
 {
 	std::array<u32, button::button_count> mapping{};
-	if (!cfg)
+	if (!device || !cfg)
 		return mapping;
+
+	device->trigger_code_left  = FindKeyCode(button_list, cfg->l2);
+	device->trigger_code_right = FindKeyCode(button_list, cfg->r2);
+	device->axis_code_left[0]  = FindKeyCode(button_list, cfg->ls_left);
+	device->axis_code_left[1]  = FindKeyCode(button_list, cfg->ls_right);
+	device->axis_code_left[2]  = FindKeyCode(button_list, cfg->ls_down);
+	device->axis_code_left[3]  = FindKeyCode(button_list, cfg->ls_up);
+	device->axis_code_right[0] = FindKeyCode(button_list, cfg->rs_left);
+	device->axis_code_right[1] = FindKeyCode(button_list, cfg->rs_right);
+	device->axis_code_right[2] = FindKeyCode(button_list, cfg->rs_down);
+	device->axis_code_right[3] = FindKeyCode(button_list, cfg->rs_up);
 
 	mapping[button::up]       = FindKeyCode(button_list, cfg->up);
 	mapping[button::down]     = FindKeyCode(button_list, cfg->down);
@@ -588,19 +606,19 @@ std::array<u32, PadHandlerBase::button::button_count> PadHandlerBase::get_mapped
 	mapping[button::start]    = FindKeyCode(button_list, cfg->start);
 	mapping[button::select]   = FindKeyCode(button_list, cfg->select);
 	mapping[button::l1]       = FindKeyCode(button_list, cfg->l1);
-	mapping[button::l2]       = FindKeyCode(button_list, cfg->l2);
+	mapping[button::l2]       = ::narrow<u32>(device->trigger_code_left);
 	mapping[button::l3]       = FindKeyCode(button_list, cfg->l3);
 	mapping[button::r1]       = FindKeyCode(button_list, cfg->r1);
-	mapping[button::r2]       = FindKeyCode(button_list, cfg->r2);
+	mapping[button::r2]       = ::narrow<u32>(device->trigger_code_right);
 	mapping[button::r3]       = FindKeyCode(button_list, cfg->r3);
-	mapping[button::ls_left]  = FindKeyCode(button_list, cfg->ls_left);
-	mapping[button::ls_right] = FindKeyCode(button_list, cfg->ls_right);
-	mapping[button::ls_down]  = FindKeyCode(button_list, cfg->ls_down);
-	mapping[button::ls_up]    = FindKeyCode(button_list, cfg->ls_up);
-	mapping[button::rs_left]  = FindKeyCode(button_list, cfg->rs_left);
-	mapping[button::rs_right] = FindKeyCode(button_list, cfg->rs_right);
-	mapping[button::rs_down]  = FindKeyCode(button_list, cfg->rs_down);
-	mapping[button::rs_up]    = FindKeyCode(button_list, cfg->rs_up);
+	mapping[button::ls_left]  = ::narrow<u32>(device->axis_code_left[0]);
+	mapping[button::ls_right] = ::narrow<u32>(device->axis_code_left[1]);
+	mapping[button::ls_down]  = ::narrow<u32>(device->axis_code_left[2]);
+	mapping[button::ls_up]    = ::narrow<u32>(device->axis_code_left[3]);
+	mapping[button::rs_left]  = ::narrow<u32>(device->axis_code_right[0]);
+	mapping[button::rs_right] = ::narrow<u32>(device->axis_code_right[1]);
+	mapping[button::rs_down]  = ::narrow<u32>(device->axis_code_right[2]);
+	mapping[button::rs_up]    = ::narrow<u32>(device->axis_code_right[3]);
 	mapping[button::ps]       = FindKeyCode(button_list, cfg->ps);
 
 	mapping[button::pressure_intensity_button] = FindKeyCode(button_list, cfg->pressure_intensity_button);
@@ -692,7 +710,7 @@ void PadHandlerBase::get_mapping(const pad_ensemble& binding)
 	}
 }
 
-void PadHandlerBase::ThreadProc()
+void PadHandlerBase::process()
 {
 	for (usz i = 0; i < m_bindings.size(); ++i)
 	{

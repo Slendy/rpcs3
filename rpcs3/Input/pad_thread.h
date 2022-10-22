@@ -26,7 +26,7 @@ public:
 
 	PadInfo& GetInfo() { return m_info; }
 	auto& GetPads() { return m_pads; }
-	void SetRumble(const u32 pad, u8 largeMotor, bool smallMotor);
+	void SetRumble(const u32 pad, u8 large_motor, bool small_motor);
 	void SetIntercepted(bool intercepted);
 
 	s32 AddLddPad();
@@ -39,7 +39,7 @@ public:
 
 protected:
 	void Init();
-	void InitLddPad(u32 handle);
+	void InitLddPad(u32 handle, const u32* port_status);
 
 	// List of all handlers
 	std::map<pad_handler, std::shared_ptr<PadHandlerBase>> handlers;

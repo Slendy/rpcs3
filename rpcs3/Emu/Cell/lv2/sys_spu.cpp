@@ -1493,7 +1493,7 @@ error_code sys_spu_thread_group_join(ppu_thread& ppu, u32 id, vm::ptr<u32> cause
 				break;
 			}
 
-			thread_ctrl::wait_on(ppu.state, state);
+			ppu.state.wait(state);
 		}
 	}
 	while (false);
@@ -2260,6 +2260,7 @@ error_code sys_raw_spu_create(ppu_thread& ppu, vm::ptr<u32> id, vm::ptr<void> at
 
 	spu_thread::g_raw_spu_id[index] = idm::last_id();
 
+	ppu.check_state();
 	*id = index;
 
 	return CELL_OK;
@@ -2346,7 +2347,6 @@ error_code raw_spu_destroy(ppu_thread& ppu, u32 id)
 		}
 
 		// Stop thread
-		thread.state += cpu_flag::exit;
 		thread = thread_state::aborting;
 		return true;
 	});
@@ -2466,6 +2466,7 @@ error_code raw_spu_create_interrupt_tag(u32 id, u32 class_id, u32 /*hwthread*/, 
 
 	if (tag)
 	{
+		cpu_thread::get_current()->check_state();
 		*intrtag = tag;
 		return CELL_OK;
 	}
@@ -2635,6 +2636,7 @@ error_code raw_spu_read_puint_mb(u32 id, vm::ptr<u32> value)
 		return CELL_ESRCH;
 	}
 
+	cpu_thread::get_current()->check_state();
 	*value = thread->ch_out_intr_mbox.pop();
 
 	return CELL_OK;
@@ -2706,6 +2708,7 @@ error_code raw_spu_get_spu_cfg(u32 id, vm::ptr<u32> value)
 		return CELL_ESRCH;
 	}
 
+	cpu_thread::get_current()->check_state();
 	*value = static_cast<u32>(thread->snr_config);
 
 	return CELL_OK;

@@ -86,6 +86,7 @@ ds3_pad_handler::ds3_pad_handler()
 	b_has_battery = true;
 	b_has_led = true;
 	b_has_rgb = false;
+	b_has_player_led = true;
 	b_has_pressure_intensity_button = false; // The DS3 obviously already has this feature natively.
 
 	m_name_string = "DS3 Pad #";
@@ -119,15 +120,15 @@ u32 ds3_pad_handler::get_battery_level(const std::string& padId)
 	return std::clamp<u32>(device->battery_level, 0, 100);
 }
 
-void ds3_pad_handler::SetPadData(const std::string& padId, u8 player_id, u32 largeMotor, u32 smallMotor, s32/* r*/, s32/* g*/, s32 /* b*/, bool /*battery_led*/, u32 /*battery_led_brightness*/)
+void ds3_pad_handler::SetPadData(const std::string& padId, u8 player_id, u8 large_motor, u8 small_motor, s32/* r*/, s32/* g*/, s32 /* b*/, bool player_led, bool /*battery_led*/, u32 /*battery_led_brightness*/)
 {
 	std::shared_ptr<ds3_device> device = get_hid_device(padId);
 	if (device == nullptr || device->hidDevice == nullptr)
 		return;
 
 	// Set the device's motor speeds to our requested values 0-255
-	device->large_motor = largeMotor;
-	device->small_motor = smallMotor;
+	device->large_motor = large_motor;
+	device->small_motor = small_motor;
 	device->player_id = player_id;
 
 	int index = 0;
@@ -146,6 +147,7 @@ void ds3_pad_handler::SetPadData(const std::string& padId, u8 player_id, u32 lar
 	}
 
 	ensure(device->config);
+	device->config->player_led_enabled.set(player_led);
 
 	// Start/Stop the engines :)
 	send_output_report(device.get());
@@ -171,7 +173,7 @@ int ds3_pad_handler::send_output_report(ds3_device* ds3dev)
 		else
 			output_report.led_enabled = 0b00000010;
 	}
-	else
+	else if (ds3dev->config->player_led_enabled)
 	{
 		switch (ds3dev->player_id)
 		{
@@ -185,6 +187,10 @@ int ds3_pad_handler::send_output_report(ds3_device* ds3dev)
 		default:
 			fmt::throw_exception("DS3 is using forbidden player id %d", ds3dev->player_id);
 		}
+	}
+	else
+	{
+		output_report.led_enabled = 0;
 	}
 
 	if (ds3dev->config->led_low_battery_blink && ds3dev->battery_level < 25)
@@ -492,17 +498,17 @@ void ds3_pad_handler::get_extended_info(const pad_ensemble& binding)
 	//pad->m_sensors[3].m_value = polish_value(pad->m_sensors[3].m_value, 1, 1, 512, 512, 0, 1023);
 }
 
-bool ds3_pad_handler::get_is_left_trigger(u64 keyCode)
+bool ds3_pad_handler::get_is_left_trigger(const std::shared_ptr<PadDevice>& /*device*/, u64 keyCode)
 {
 	return keyCode == DS3KeyCodes::L2;
 }
 
-bool ds3_pad_handler::get_is_right_trigger(u64 keyCode)
+bool ds3_pad_handler::get_is_right_trigger(const std::shared_ptr<PadDevice>& /*device*/, u64 keyCode)
 {
 	return keyCode == DS3KeyCodes::R2;
 }
 
-bool ds3_pad_handler::get_is_left_stick(u64 keyCode)
+bool ds3_pad_handler::get_is_left_stick(const std::shared_ptr<PadDevice>& /*device*/, u64 keyCode)
 {
 	switch (keyCode)
 	{
@@ -516,7 +522,7 @@ bool ds3_pad_handler::get_is_left_stick(u64 keyCode)
 	}
 }
 
-bool ds3_pad_handler::get_is_right_stick(u64 keyCode)
+bool ds3_pad_handler::get_is_right_stick(const std::shared_ptr<PadDevice>& /*device*/, u64 keyCode)
 {
 	switch (keyCode)
 	{
@@ -579,8 +585,8 @@ void ds3_pad_handler::apply_pad_data(const pad_ensemble& binding)
 	const int idx_l = config->switch_vibration_motors ? 1 : 0;
 	const int idx_s = config->switch_vibration_motors ? 0 : 1;
 
-	const int speed_large = config->enable_vibration_motor_large ? pad->m_vibrateMotors[idx_l].m_value : vibration_min;
-	const int speed_small = config->enable_vibration_motor_small ? pad->m_vibrateMotors[idx_s].m_value : vibration_min;
+	const u8 speed_large = config->enable_vibration_motor_large ? pad->m_vibrateMotors[idx_l].m_value : 0;
+	const u8 speed_small = config->enable_vibration_motor_small ? pad->m_vibrateMotors[idx_s].m_value : 0;
 
 	const bool wireless    = dev->cable_state == 0;
 	const bool low_battery = dev->battery_level < 25;
@@ -613,6 +619,13 @@ void ds3_pad_handler::apply_pad_data(const pad_ensemble& binding)
 			dev->new_output_data = true;
 			dev->last_battery_level = dev->battery_level;
 		}
+	}
+
+	// Use LEDs to indicate battery level
+	if (dev->enable_player_leds != config->player_led_enabled.get())
+	{
+		dev->new_output_data = true;
+		dev->enable_player_leds = config->player_led_enabled.get();
 	}
 
 	dev->new_output_data |= dev->large_motor != speed_large || dev->small_motor != speed_small;

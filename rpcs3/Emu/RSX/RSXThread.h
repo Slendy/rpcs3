@@ -42,9 +42,11 @@ namespace rsx
 
 	struct rsx_iomap_table
 	{
+		static constexpr u32 c_lock_stride = 8192;
+
 		std::array<atomic_t<u32>, 4096> ea;
 		std::array<atomic_t<u32>, 4096> io;
-		std::array<shared_mutex, 0x8'0000> rs;
+		std::array<shared_mutex, 0x1'0000'0000 / c_lock_stride> rs;
 
 		rsx_iomap_table() noexcept;
 
@@ -63,7 +65,7 @@ namespace rsx
 
 			bool added_wait = false;
 
-			for (u32 block = addr / 8192; block <= (end / 8192); block += Stride)
+			for (u32 block = addr / c_lock_stride; block <= (end / c_lock_stride); block += Stride)
 			{
 				auto& mutex_ = rs[block];
 
@@ -148,11 +150,17 @@ namespace rsx
 
 		push_buffer_arrays_dirty = 0x20000,   // Push buffers have data written to them (immediate mode vertex buffers)
 
+		polygon_offset_state_dirty = 0x40000, // Polygon offset config was changed
+		depth_bounds_state_dirty   = 0x80000, // Depth bounds configuration changed
+
 		fragment_program_dirty = fragment_program_ucode_dirty | fragment_program_state_dirty,
 		vertex_program_dirty = vertex_program_ucode_dirty | vertex_program_state_dirty,
 		invalidate_pipeline_bits = fragment_program_dirty | vertex_program_dirty,
 		invalidate_zclip_bits = vertex_state_dirty | zclip_config_state_dirty,
 		memory_barrier_bits = framebuffer_reads_dirty,
+
+		// Vulkan-specific signals
+		invalidate_vk_dynamic_state = zclip_config_state_dirty | scissor_config_state_dirty | polygon_offset_state_dirty | depth_bounds_state_dirty,
 
 		all_dirty = ~0u
 	};
@@ -886,15 +894,18 @@ namespace rsx
 	template<bool IsFullLock = false, uint Stride = 128>
 	class reservation_lock
 	{
-		u32 addr = 0, length = 0;
-		bool locked = false;
+		u32 addr = 0;
+		u32 length = 0;
 
 		inline void lock_range(u32 addr, u32 length)
 		{
+			if (!get_current_renderer()->iomap_table.lock<IsFullLock, Stride>(addr, length, get_current_cpu_thread()))
+			{
+				length = 0;
+			}
+
 			this->addr = addr;
 			this->length = length;
-
-			this->locked = get_current_renderer()->iomap_table.lock<IsFullLock, Stride>(addr, length, get_current_cpu_thread());
 		}
 
 	public:
@@ -942,12 +953,40 @@ namespace rsx
 			}
 		}
 
-		~reservation_lock()
+		// Very special utility for batched transfers (SPU related)
+		template <typename T = void>
+		void update_if_enabled(u32 addr, u32 _length, const std::add_pointer_t<T>& lock_release = std::add_pointer_t<void>{})
 		{
-			if (locked)
+			// This check is not perfect but it covers the important cases fast (this check is only an optimization - forcing true disables it)
+			if (length && (this->addr / rsx_iomap_table::c_lock_stride != addr / rsx_iomap_table::c_lock_stride || (addr % rsx_iomap_table::c_lock_stride + _length) > rsx_iomap_table::c_lock_stride) && _length > 1)
+			{
+				if constexpr (!std::is_void_v<T>)
+				{
+					// See SPUThread.cpp
+					lock_release->release(0);
+				}
+
+				unlock();
+				lock_range(addr, _length);
+			}
+		}
+
+		void unlock(bool destructor = false)
+		{
+			if (length)
 			{
 				get_current_renderer()->iomap_table.unlock<IsFullLock, Stride>(addr, length);
+
+				if (!destructor)
+				{
+					length = 0;
+				}
 			}
+		}
+
+		~reservation_lock()
+		{
+			unlock(true);
 		}
 	};
 

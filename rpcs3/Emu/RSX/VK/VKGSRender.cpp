@@ -1169,6 +1169,7 @@ void VKGSRender::set_viewport()
 		m_viewport.maxDepth = 1.f;
 	}
 
+	m_current_command_buffer->flags |= vk::command_buffer::cb_reload_dynamic_state;
 	m_graphics_state &= ~(rsx::pipeline_state::zclip_config_state_dirty);
 }
 
@@ -1181,6 +1182,8 @@ void VKGSRender::set_scissor(bool clip_viewport)
 		m_scissor.extent.width = scissor.width();
 		m_scissor.offset.x = scissor.x1;
 		m_scissor.offset.y = scissor.y1;
+
+		m_current_command_buffer->flags |= vk::command_buffer::cb_reload_dynamic_state;
 	}
 }
 
@@ -1731,7 +1734,6 @@ bool VKGSRender::load_program()
 
 	auto &vertex_program = current_vertex_program;
 	auto &fragment_program = current_fragment_program;
-	auto old_program = m_program;
 
 	vk::pipeline_props properties{};
 
@@ -1929,7 +1931,7 @@ bool VKGSRender::load_program()
 
 	if (!m_program && (shadermode == shader_mode::async_with_interpreter || shadermode == shader_mode::interpreter_only))
 	{
-		if (!m_shader_interpreter.is_interpreter(old_program))
+		if (!m_shader_interpreter.is_interpreter(m_prev_program))
 		{
 			m_interpreter_state = rsx::invalidate_pipeline_bits;
 		}
@@ -2416,6 +2418,52 @@ void VKGSRender::prepare_rtts(rsx::framebuffer_creation_context context)
 		m_rtts.superseded_surfaces.clear();
 	}
 
+	if (!m_rtts.orphaned_surfaces.empty())
+	{
+		u32 gcm_format;
+		bool swap_bytes;
+
+		for (auto& [base_addr, surface] : m_rtts.orphaned_surfaces)
+		{
+			bool lock = surface->is_depth_surface() ? !!g_cfg.video.write_depth_buffer :
+				!!g_cfg.video.write_color_buffers;
+
+			if (lock &&
+				!m_texture_cache.is_protected(
+					base_addr,
+					surface->get_memory_range(),
+					rsx::texture_upload_context::framebuffer_storage))
+			{
+				lock = false;
+			}
+
+			if (!lock) [[likely]]
+			{
+				m_texture_cache.commit_framebuffer_memory_region(*m_current_command_buffer, surface->get_memory_range());
+				continue;
+			}
+
+			if (surface->is_depth_surface())
+			{
+				gcm_format = (surface->get_surface_depth_format() != rsx::surface_depth_format::z16) ? CELL_GCM_TEXTURE_DEPTH16 : CELL_GCM_TEXTURE_DEPTH24_D8;
+				swap_bytes = true;
+			}
+			else
+			{
+				auto info = get_compatible_gcm_format(surface->get_surface_color_format());
+				gcm_format = info.first;
+				swap_bytes = info.second;
+			}
+
+			m_texture_cache.lock_memory_region(
+				*m_current_command_buffer, surface, surface->get_memory_range(), false,
+				surface->get_surface_width<rsx::surface_metrics::pixels>(), surface->get_surface_height<rsx::surface_metrics::pixels>(), surface->get_rsx_pitch(),
+				gcm_format, swap_bytes);
+		}
+
+		m_rtts.orphaned_surfaces.clear();
+	}
+
 	const auto color_fmt_info = get_compatible_gcm_format(m_framebuffer_layout.color_format);
 	for (u8 index : m_draw_buffers)
 	{
@@ -2449,43 +2497,6 @@ void VKGSRender::prepare_rtts(rsx::framebuffer_creation_context context)
 		{
 			m_texture_cache.commit_framebuffer_memory_region(*m_current_command_buffer, surface_range);
 		}
-	}
-
-	if (!m_rtts.orphaned_surfaces.empty())
-	{
-		u32 gcm_format;
-		bool swap_bytes;
-
-		for (auto& surface : m_rtts.orphaned_surfaces)
-		{
-			const bool lock = surface->is_depth_surface() ? !!g_cfg.video.write_depth_buffer :
-				!!g_cfg.video.write_color_buffers;
-
-			if (!lock) [[likely]]
-			{
-				m_texture_cache.commit_framebuffer_memory_region(*m_current_command_buffer, surface->get_memory_range());
-				continue;
-			}
-
-			if (surface->is_depth_surface())
-			{
-				gcm_format = (surface->get_surface_depth_format() != rsx::surface_depth_format::z16) ? CELL_GCM_TEXTURE_DEPTH16 : CELL_GCM_TEXTURE_DEPTH24_D8;
-				swap_bytes = true;
-			}
-			else
-			{
-				auto info = get_compatible_gcm_format(surface->get_surface_color_format());
-				gcm_format = info.first;
-				swap_bytes = info.second;
-			}
-
-			m_texture_cache.lock_memory_region(
-				*m_current_command_buffer, surface, surface->get_memory_range(), false,
-				surface->get_surface_width<rsx::surface_metrics::pixels>(), surface->get_surface_height<rsx::surface_metrics::pixels>(), surface->get_rsx_pitch(),
-				gcm_format, swap_bytes);
-		}
-
-		m_rtts.orphaned_surfaces.clear();
 	}
 
 	m_current_renderpass_key = vk::get_renderpass_key(m_fbo_images);

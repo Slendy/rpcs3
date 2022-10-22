@@ -13,7 +13,7 @@ constexpr id_pair ZEROPLUS_ID_0 = {0x0C12, 0x0E20};
 namespace
 {
 	constexpr u32 DS4_ACC_RES_PER_G = 8192;
-	constexpr u32 DS4_GYRO_RES_PER_DEG_S = 16; // technically this could be 1024, but keeping it at 16 keeps us within 16 bits of precision
+	constexpr u32 DS4_GYRO_RES_PER_DEG_S = 86; // technically this could be 1024, but keeping it at 86 keeps us within 16 bits of precision
 	constexpr u32 DS4_FEATURE_REPORT_0x02_SIZE = 37;
 	constexpr u32 DS4_FEATURE_REPORT_0x05_SIZE = 41;
 	constexpr u32 DS4_FEATURE_REPORT_0x12_SIZE = 16;
@@ -113,8 +113,6 @@ ds4_pad_handler::ds4_pad_handler()
 	thumb_max = 255;
 	trigger_min = 0;
 	trigger_max = 255;
-	vibration_min = 0;
-	vibration_max = 255;
 
 	// set capabilities
 	b_has_config = true;
@@ -197,15 +195,15 @@ u32 ds4_pad_handler::get_battery_level(const std::string& padId)
 	return std::min<u32>(device->battery_level * 10, 100);
 }
 
-void ds4_pad_handler::SetPadData(const std::string& padId, u8 player_id, u32 largeMotor, u32 smallMotor, s32 r, s32 g, s32 b, bool battery_led, u32 battery_led_brightness)
+void ds4_pad_handler::SetPadData(const std::string& padId, u8 player_id, u8 large_motor, u8 small_motor, s32 r, s32 g, s32 b, bool /*player_led*/, bool battery_led, u32 battery_led_brightness)
 {
 	std::shared_ptr<DS4Device> device = get_hid_device(padId);
 	if (!device || !device->hidDevice || !device->config)
 		return;
 
 	// Set the device's motor speeds to our requested values 0-255
-	device->large_motor = largeMotor;
-	device->small_motor = smallMotor;
+	device->large_motor = large_motor;
+	device->small_motor = small_motor;
 	device->player_id = player_id;
 
 	int index = 0;
@@ -755,17 +753,17 @@ ds4_pad_handler::DataStatus ds4_pad_handler::get_data(DS4Device* device)
 	return DataStatus::NewData;
 }
 
-bool ds4_pad_handler::get_is_left_trigger(u64 keyCode)
+bool ds4_pad_handler::get_is_left_trigger(const std::shared_ptr<PadDevice>& /*device*/, u64 keyCode)
 {
 	return keyCode == DS4KeyCodes::L2;
 }
 
-bool ds4_pad_handler::get_is_right_trigger(u64 keyCode)
+bool ds4_pad_handler::get_is_right_trigger(const std::shared_ptr<PadDevice>& /*device*/, u64 keyCode)
 {
 	return keyCode == DS4KeyCodes::R2;
 }
 
-bool ds4_pad_handler::get_is_left_stick(u64 keyCode)
+bool ds4_pad_handler::get_is_left_stick(const std::shared_ptr<PadDevice>& /*device*/, u64 keyCode)
 {
 	switch (keyCode)
 	{
@@ -779,7 +777,7 @@ bool ds4_pad_handler::get_is_left_stick(u64 keyCode)
 	}
 }
 
-bool ds4_pad_handler::get_is_right_stick(u64 keyCode)
+bool ds4_pad_handler::get_is_right_stick(const std::shared_ptr<PadDevice>& /*device*/, u64 keyCode)
 {
 	switch (keyCode)
 	{
@@ -862,15 +860,15 @@ void ds4_pad_handler::get_extended_info(const pad_ensemble& binding)
 	pad->m_sensors[1].m_value = Clamp0To1023(accelY);
 	pad->m_sensors[2].m_value = Clamp0To1023(accelZ);
 
-	// gyroX is yaw, which is all that we need
-	f32 gyroX = static_cast<s16>((buf[16] << 8) | buf[15]) / static_cast<f32>(DS4_GYRO_RES_PER_DEG_S) * -1;
-	//const int gyroY = ((u16)(buf[14] << 8) | buf[13]) / 256;
-	//const int gyroZ = ((u16)(buf[18] << 8) | buf[17]) / 256;
+	// gyroY is yaw, which is all that we need
+	//f32 gyroX = static_cast<s16>((u16)(buf[14] << 8) | buf[13]) / static_cast<f32>(DS4_GYRO_RES_PER_DEG_S) * -1;
+	f32 gyroY = static_cast<s16>((buf[16] << 8) | buf[15]) / static_cast<f32>(DS4_GYRO_RES_PER_DEG_S) * -1;
+	//f32 gyroZ = static_cast<s16>((u16)(buf[18] << 8) | buf[17]) / static_cast<f32>(DS4_GYRO_RES_PER_DEG_S) * -1;
 
-	// convert to ds3
-	gyroX = gyroX * (123.f / 90.f) + 512;
+	// Convert to ds3. The ds3 resolution is 123/90°/sec.
+	gyroY = gyroY * (123.f / 90.f) + 512;
 
-	pad->m_sensors[3].m_value = Clamp0To1023(gyroX);
+	pad->m_sensors[3].m_value = Clamp0To1023(gyroY);
 }
 
 void ds4_pad_handler::apply_pad_data(const pad_ensemble& binding)
@@ -888,8 +886,8 @@ void ds4_pad_handler::apply_pad_data(const pad_ensemble& binding)
 	const int idx_l = config->switch_vibration_motors ? 1 : 0;
 	const int idx_s = config->switch_vibration_motors ? 0 : 1;
 
-	const int speed_large = config->enable_vibration_motor_large ? pad->m_vibrateMotors[idx_l].m_value : vibration_min;
-	const int speed_small = config->enable_vibration_motor_small ? pad->m_vibrateMotors[idx_s].m_value : vibration_min;
+	const u8 speed_large = config->enable_vibration_motor_large ? pad->m_vibrateMotors[idx_l].m_value : 0;
+	const u8 speed_small = config->enable_vibration_motor_small ? pad->m_vibrateMotors[idx_s].m_value : 0;
 
 	const bool wireless    = ds4_dev->cable_state == 0;
 	const bool low_battery = ds4_dev->battery_level < 2;

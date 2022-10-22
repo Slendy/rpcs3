@@ -27,7 +27,7 @@ enum PortSettings
 	CELL_PAD_SETTING_SENSOR_OFF = 0x00000000,
 };
 
-enum Digital1Flags
+enum Digital1Flags : u32
 {
 	CELL_PAD_CTRL_SELECT = 0x00000001,
 	CELL_PAD_CTRL_L3     = 0x00000002,
@@ -39,7 +39,7 @@ enum Digital1Flags
 	CELL_PAD_CTRL_LEFT   = 0x00000080,
 };
 
-enum Digital2Flags
+enum Digital2Flags : u32
 {
 	CELL_PAD_CTRL_L2       = 0x00000001,
 	CELL_PAD_CTRL_R2       = 0x00000002,
@@ -250,11 +250,11 @@ struct AnalogSensor
 
 struct VibrateMotor
 {
-	bool m_isLargeMotor = false;
-	u16 m_value = 0;
+	bool m_is_large_motor = false;
+	u8 m_value = 0;
 
-	VibrateMotor(bool largeMotor, u16 value)
-		: m_isLargeMotor(largeMotor)
+	VibrateMotor(bool is_large_motor, u8 value)
+		: m_is_large_motor(is_large_motor)
 		, m_value(value)
 	{}
 };

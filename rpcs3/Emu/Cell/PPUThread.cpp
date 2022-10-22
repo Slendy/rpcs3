@@ -1953,6 +1953,13 @@ void ppu_thread::fast_call(u32 addr, u64 rtoc)
 			return fmt::format("PPU[0x%x] Thread (%s) [HLE:0x%08x, LR:0x%08x]", _this->id, *name_cache.get(), cia, _this->lr);
 		}
 
+		extern const char* get_prx_name_by_cia(u32 addr);
+
+		if (auto name = get_prx_name_by_cia(cia))
+		{
+			return fmt::format("PPU[0x%x] Thread (%s) [%s: 0x%08x]", _this->id, *name_cache.get(), name, cia);	
+		}
+
 		return fmt::format("PPU[0x%x] Thread (%s) [0x%08x]", _this->id, *name_cache.get(), cia);
 	};
 
@@ -3288,6 +3295,10 @@ bool ppu_initialize(const ppu_module& info, bool check_only)
 	{
 		std::unordered_map<std::string, u64> link_table
 		{
+			{ "sys_game_watchdog_start", reinterpret_cast<u64>(ppu_execute_syscall) },
+			{ "sys_game_watchdog_stop", reinterpret_cast<u64>(ppu_execute_syscall) },
+			{ "sys_game_watchdog_clear", reinterpret_cast<u64>(ppu_execute_syscall) },
+			{ "sys_game_get_system_sw_version", reinterpret_cast<u64>(ppu_execute_syscall) },
 			{ "sys_game_board_storage_read", reinterpret_cast<u64>(ppu_execute_syscall) },
 			{ "__trap", reinterpret_cast<u64>(&ppu_trap) },
 			{ "__error", reinterpret_cast<u64>(&ppu_error) },
@@ -3733,6 +3744,11 @@ bool ppu_initialize(const ppu_module& info, bool check_only)
 
 				// Allocate "core"
 				std::lock_guard jlock(g_fxo->get<jit_core_allocator>().sem);
+
+				if (Emu.IsStopped())
+				{
+					continue;
+				}
 
 				ppu_log.warning("LLVM: Compiling module %s%s", cache_path, obj_name);
 

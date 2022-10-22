@@ -5,6 +5,7 @@
 #include "VKAsyncScheduler.h"
 #include "VKGSRender.h"
 #include "vkutils/buffer_object.h"
+#include "vkutils/chip_class.h"
 
 namespace vk
 {
@@ -128,26 +129,18 @@ void VKGSRender::update_draw_state()
 {
 	m_profiler.start();
 
-	const float actual_line_width =
-	    m_device->get_wide_lines_support() ? rsx::method_registers.line_width() * rsx::get_resolution_scale() : 1.f;
-	vkCmdSetLineWidth(*m_current_command_buffer, actual_line_width);
-
-	if (rsx::method_registers.poly_offset_fill_enabled())
+	// Update conditional dynamic state
+	if (rsx::method_registers.current_draw_clause.primitive >= rsx::primitive_type::lines &&
+		rsx::method_registers.current_draw_clause.primitive <= rsx::primitive_type::line_strip)
 	{
-		//offset_bias is the constant factor, multiplied by the implementation factor R
-		//offst_scale is the slope factor, multiplied by the triangle slope factor M
-		vkCmdSetDepthBias(*m_current_command_buffer, rsx::method_registers.poly_offset_bias(), 0.f, rsx::method_registers.poly_offset_scale());
-	}
-	else
-	{
-		//Zero bias value - disables depth bias
-		vkCmdSetDepthBias(*m_current_command_buffer, 0.f, 0.f, 0.f);
+		const float actual_line_width =
+			m_device->get_wide_lines_support() ? rsx::method_registers.line_width() * rsx::get_resolution_scale() : 1.f;
+		vkCmdSetLineWidth(*m_current_command_buffer, actual_line_width);
 	}
 
-	//Update dynamic state
 	if (rsx::method_registers.blend_enabled())
 	{
-		//Update blend constants
+		// Update blend constants
 		auto blend_colors = rsx::get_constant_blend_colors();
 		vkCmdSetBlendConstants(*m_current_command_buffer, blend_colors.data());
 	}
@@ -167,6 +160,41 @@ void VKGSRender::update_draw_state()
 			vkCmdSetStencilCompareMask(*m_current_command_buffer, VK_STENCIL_FACE_BACK_BIT, rsx::method_registers.back_stencil_func_mask());
 			vkCmdSetStencilReference(*m_current_command_buffer, VK_STENCIL_FACE_BACK_BIT, rsx::method_registers.back_stencil_func_ref());
 		}
+	}
+
+	// The remaining dynamic state should only be set once and we have signals to enable/disable mid-renderpass
+	if (!(m_current_command_buffer->flags & vk::command_buffer::cb_reload_dynamic_state))
+	{
+		// Dynamic state already set
+		m_frame_stats.setup_time += m_profiler.duration();
+		return;
+	}
+
+	if (rsx::method_registers.poly_offset_fill_enabled())
+	{
+		// offset_bias is the constant factor, multiplied by the implementation factor R
+		// offst_scale is the slope factor, multiplied by the triangle slope factor M
+		// R is implementation dependent and has to be derived empirically for supported implementations.
+		// Lucky for us, only NVIDIA currently supports fixed-point 24-bit depth buffers.
+
+		const auto polygon_offset_scale = rsx::method_registers.poly_offset_scale();
+		auto polygon_offset_bias = rsx::method_registers.poly_offset_bias();
+
+		if (m_draw_fbo->depth_format() == VK_FORMAT_D24_UNORM_S8_UINT && is_NVIDIA(vk::get_chip_family()))
+		{
+			// Empirically derived to be 0.5 * (2^24 - 1) for fixed type on Pascal. The same seems to apply for other NVIDIA GPUs.
+			// RSX seems to be using 2^24 - 1 instead making the biases twice as large when using fixed type Z-buffer on NVIDIA.
+			// Note, that the formula for floating point is complicated, but actually works out for us.
+			// Since the exponent range for a polygon is around 0, and we have 23 (+1) mantissa bits, R just works out to the same range by chance \o/.
+			polygon_offset_bias *= 0.5f;
+		}
+
+		vkCmdSetDepthBias(*m_current_command_buffer, polygon_offset_bias, 0.f, polygon_offset_scale);
+	}
+	else
+	{
+		// Zero bias value - disables depth bias
+		vkCmdSetDepthBias(*m_current_command_buffer, 0.f, 0.f, 0.f);
 	}
 
 	if (m_device->get_depth_bounds_support())
@@ -196,8 +224,8 @@ void VKGSRender::update_draw_state()
 
 	bind_viewport();
 
-	//TODO: Set up other render-state parameters into the program pipeline
-
+	m_current_command_buffer->flags &= ~vk::command_buffer::cb_reload_dynamic_state;
+	m_graphics_state &= ~(rsx::pipeline_state::polygon_offset_state_dirty | rsx::pipeline_state::depth_bounds_state_dirty);
 	m_frame_stats.setup_time += m_profiler.duration();
 }
 
@@ -817,6 +845,9 @@ void VKGSRender::emit_geometry(u32 sub_index)
 			vk::end_renderpass(cmd);
 		}
 
+		// Starting a new renderpass should clobber dynamic state
+		m_current_command_buffer->flags |= vk::command_buffer::cb_reload_dynamic_state;
+
 		reload_state = true;
 	});
 
@@ -896,10 +927,21 @@ void VKGSRender::begin()
 
 	rsx::thread::begin();
 
-	if (skip_current_frame || swapchain_unavailable || cond_render_ctrl.disable_rendering())
+	if (skip_current_frame ||
+		swapchain_unavailable ||
+		cond_render_ctrl.disable_rendering())
+	{
 		return;
+	}
 
 	init_buffers(rsx::framebuffer_creation_context::context_draw);
+
+	if (m_graphics_state & rsx::pipeline_state::invalidate_pipeline_bits)
+	{
+		// Shaders need to be reloaded.
+		m_prev_program = m_program;
+		m_program = nullptr;
+	}
 }
 
 void VKGSRender::end()
@@ -1013,6 +1055,11 @@ void VKGSRender::end()
 
 	u32 sub_index = 0;               // RSX subdraw ID
 	m_current_draw.subdraw_id = 0;   // Host subdraw ID. Invalid RSX subdraws do not increment this value
+
+	if (m_graphics_state & rsx::pipeline_state::invalidate_vk_dynamic_state)
+	{
+		m_current_command_buffer->flags |= vk::command_buffer::cb_reload_dynamic_state;
+	}
 
 	rsx::method_registers.current_draw_clause.begin();
 	do

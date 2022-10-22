@@ -40,7 +40,7 @@ enum class AudioChannelCnt : u32
 enum class AudioStateEvent : u32
 {
 	UNSPECIFIED_ERROR,
-	DEFAULT_DEVICE_CHANGED,
+	DEFAULT_DEVICE_MAYBE_CHANGED,
 };
 
 class AudioBackend
@@ -226,7 +226,7 @@ protected:
 	AudioFreq       m_sampling_rate = AudioFreq::FREQ_48K;
 	AudioChannelCnt m_channels = AudioChannelCnt::STEREO;
 
-	shared_mutex m_cb_mutex{};
+	std::timed_mutex m_cb_mutex{};
 	std::function<u32(u32, void *)> m_write_callback{};
 
 	shared_mutex m_state_cb_mutex{};

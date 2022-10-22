@@ -8,6 +8,7 @@
 
 #include <mutex>
 
+#include "Emu/Io/PadHandler.h"
 #include "Emu/Io/pad_config.h"
 #include "Emu/GameInfo.h"
 #include "Utilities/Thread.h"
@@ -89,9 +90,6 @@ public:
 	explicit pad_settings_dialog(std::shared_ptr<gui_settings> gui_settings, QWidget *parent = nullptr, const GameInfo *game = nullptr);
 	~pad_settings_dialog();
 
-public Q_SLOTS:
-	void apply_led_settings(int colorR, int colorG, int colorB, bool led_low_battery_blink, bool led_battery_indicator, int led_battery_indicator_brightness);
-
 private Q_SLOTS:
 	void OnPadButtonClicked(int id);
 	void OnTabChanged(int index);
@@ -164,7 +162,7 @@ private:
 	std::mutex m_input_mutex;
 	struct input_callback_data
 	{
-		bool success = false;
+		PadHandlerBase::connection status = PadHandlerBase::disconnected;
 		bool has_new_data = false;
 		u16 val = 0;
 		std::string name;

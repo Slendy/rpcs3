@@ -5,6 +5,7 @@
 #include "rpcs3_version.h"
 #include "Utilities/mutex.h"
 #include "Utilities/lockless.h"
+#include "util/asm.hpp"
 
 #include <QMenu>
 #include <QActionGroup>
@@ -155,11 +156,10 @@ log_frame::log_frame(std::shared_ptr<gui_settings> _gui_settings, QWidget* paren
 	m_tty_file.open(fs::get_cache_dir() + "TTY.log", fs::read + fs::create);
 
 	CreateAndConnectActions();
+	LoadSettings();
 
-	// Check for updates every ~10 ms
-	QTimer *timer = new QTimer(this);
-	connect(timer, &QTimer::timeout, this, &log_frame::UpdateUI);
-	timer->start(10);
+	m_timer = new QTimer(this);
+	connect(m_timer, &QTimer::timeout, this, &log_frame::UpdateUI);
 }
 
 void log_frame::SetLogLevel(logs::level lev) const
@@ -394,8 +394,6 @@ void log_frame::CreateAndConnectActions()
 
 		m_tty_input->clear();
 	});
-
-	LoadSettings();
 }
 
 void log_frame::LoadSettings()
@@ -419,6 +417,14 @@ void log_frame::LoadSettings()
 	if (m_tty)
 	{
 		m_tty->document()->setMaximumBlockCount(m_gui_settings->GetValue(gui::l_limit_tty).toInt());
+	}
+
+	// Note: There's an issue where the scrollbar value won't be set to max if we start the log frame too early,
+	//       so let's delay the timer until we load the settings from the main window for the first time.
+	if (m_timer && !m_timer->isActive())
+	{
+		// Check for updates every ~10 ms
+		m_timer->start(10);
 	}
 }
 
@@ -505,22 +511,25 @@ void log_frame::UpdateUI()
 	const std::chrono::time_point log_timeout = start + 7ms;
 
 	// Check TTY logs
-	while (const u64 size = std::max<s64>(0, g_tty_size.load() - (m_tty_file ? m_tty_file.pos() : 0)))
+	if (u64 size = std::max<s64>(0, m_tty_file ? (g_tty_size.load() - m_tty_file.pos()) : 0))
 	{
-		std::string buf;
-		buf.resize(size);
-		buf.resize(m_tty_file.read(&buf.front(), buf.size()));
-
-		// Ignore control characters and greater/equal to 0x80
-		buf.erase(std::remove_if(buf.begin(), buf.end(), [](s8 c) { return c <= 0x8 || c == 0x7F || (c >= 0xE && c <= 0x1F); }), buf.end());
-
-		if (!buf.empty() && m_tty_act->isChecked())
+		if (m_tty_act->isChecked())
 		{
-			std::stringstream buf_stream;
-			buf_stream.str(buf);
+			m_tty_buf.resize(std::min<u64>(size, m_tty_limited_read ? m_tty_limited_read : usz{umax}));
+			m_tty_buf.resize(m_tty_file.read(&m_tty_buf.front(), m_tty_buf.size()));
+			m_tty_limited_read = 0;
+
+			usz str_index = 0;
 			std::string buf_line;
-			while (std::getline(buf_stream, buf_line))
+
+			while (str_index < m_tty_buf.size())
 			{
+				buf_line.assign(std::string_view(m_tty_buf).substr(str_index, m_tty_buf.find_first_of('\n', str_index) - str_index));
+				str_index += buf_line.size() + 1;
+
+				// Ignore control characters and greater/equal to 0x80
+				buf_line.erase(std::remove_if(buf_line.begin(), buf_line.end(), [](s8 c) { return c <= 0x8 || c == 0x7F || (c >= 0xE && c <= 0x1F); }), buf_line.end());
+
 				// save old scroll bar state
 				QScrollBar* sb = m_tty->verticalScrollBar();
 				const int sb_pos = sb->value();
@@ -577,11 +586,44 @@ void log_frame::UpdateUI()
 
 				// set scrollbar to max means auto-scroll
 				sb->setValue(is_max ? sb->maximum() : sb_pos);
+
+				// Limit processing time
+				if (steady_clock::now() >= tty_timeout)
+				{
+					const s64 back = ::narrow<s64>(str_index) - ::narrow<s64>(m_tty_buf.size());
+					ensure(back <= 1);
+
+					if (back < 0)
+					{
+						// If more than two thirds of the buffer are unprocessed make the next fs::file::read read only that
+						// This is because reading is also costly on performance, and if we already know half of that takes more time than our limit..
+						const usz third_size = utils::aligned_div(m_tty_buf.size(), 3);
+
+						if (back <= -16384 && static_cast<usz>(0 - back) >= third_size * 2)
+						{
+							// This only really works if there is a newline somewhere
+							const usz known_term = std::string_view(m_tty_buf).substr(str_index, str_index * 2).find_last_of('\n', str_index * 2 - 4096);
+
+							if (known_term != umax)
+							{
+								m_tty_limited_read = known_term + 1 - str_index;
+							}
+						}
+
+						// Revert unprocessed reads
+						m_tty_file.seek(back, fs::seek_cur);
+					}
+
+					break;
+				}
 			}
 		}
-
-		// Limit processing time
-		if (steady_clock::now() >= tty_timeout || buf.empty()) break;
+		else
+		{
+			// Advance in position without printing
+			m_tty_file.seek(size, fs::seek_cur);
+			m_tty_limited_read = 0;
+		}
 	}
 
 	const auto font_start_tag = [](const QColor& color) -> const QString { return QStringLiteral("<font color = \"") % color.name() % QStringLiteral("\">"); };
@@ -610,7 +652,7 @@ void log_frame::UpdateUI()
 
 		// save old log state
 		QScrollBar* sb = m_log->verticalScrollBar();
-		const bool isMax = sb->value() == sb->maximum();
+		const bool is_max = sb->value() == sb->maximum();
 		const int sb_pos = sb->value();
 
 		QTextCursor text_cursor = m_log->textCursor();
@@ -668,7 +710,7 @@ void log_frame::UpdateUI()
 		m_log->setTextCursor(text_cursor);
 
 		// set scrollbar to max means auto-scroll
-		sb->setValue(isMax ? sb->maximum() : sb_pos);
+		sb->setValue(is_max ? sb->maximum() : sb_pos);
 		m_log_text.clear();
 	};
 

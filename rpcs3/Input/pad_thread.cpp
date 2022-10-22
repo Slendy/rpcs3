@@ -38,7 +38,7 @@ struct pad_setting
 	u32 port_status = 0;
 	u32 device_capability = 0;
 	u32 device_type = 0;
-	s32 ldd_handle = -1;
+	bool is_ldd_pad = false;
 };
 
 pad_thread::pad_thread(void* curthread, void* curwindow, std::string_view title_id) : m_curthread(curthread), m_curwindow(curwindow)
@@ -68,7 +68,7 @@ void pad_thread::Init()
 				m_pads[i]->m_port_status,
 				m_pads[i]->m_device_capability,
 				m_pads[i]->m_device_type,
-				m_pads[i]->ldd ? static_cast<s32>(i) : -1
+				m_pads[i]->ldd
 			};
 		}
 		else
@@ -78,7 +78,7 @@ void pad_thread::Init()
 				CELL_PAD_STATUS_DISCONNECTED,
 				CELL_PAD_CAPABILITY_PS3_CONFORMITY | CELL_PAD_CAPABILITY_PRESS_MODE | CELL_PAD_CAPABILITY_ACTUATOR,
 				CELL_PAD_DEV_TYPE_STANDARD,
-				-1
+				false
 			};
 		}
 	}
@@ -96,6 +96,8 @@ void pad_thread::Init()
 	{
 		active_profile = g_cfg_profile.active_profiles.get_value(g_cfg_profile.global_key);
 	}
+
+	input_log.notice("Using pad profile: '%s'", active_profile);
 
 	// Load in order to get the pad handlers
 	if (!g_cfg_input.load(pad::g_title_id, active_profile))
@@ -116,6 +118,8 @@ void pad_thread::Init()
 		input_log.notice("Reloaded empty pad config");
 	}
 
+	input_log.trace("Using pad config:\n%s", g_cfg_input.to_string());
+
 	std::shared_ptr<keyboard_pad_handler> keyptr;
 
 	// Always have a Null Pad Handler
@@ -124,10 +128,10 @@ void pad_thread::Init()
 
 	for (u32 i = 0; i < CELL_PAD_MAX_PORT_NUM; i++) // max 7 pads
 	{
+		cfg_player* cfg = g_cfg_input.player[i];
 		std::shared_ptr<PadHandlerBase> cur_pad_handler;
 
-		const bool is_ldd_pad = pad_settings[i].ldd_handle == static_cast<s32>(i);
-		const auto handler_type = is_ldd_pad ? pad_handler::null : g_cfg_input.player[i]->handler.get();
+		const pad_handler handler_type = pad_settings[i].is_ldd_pad ? pad_handler::null : cfg->handler.get();
 
 		if (handlers.contains(handler_type))
 		{
@@ -174,30 +178,34 @@ void pad_thread::Init()
 
 		m_pads[i] = std::make_shared<Pad>(handler_type, CELL_PAD_STATUS_DISCONNECTED, pad_settings[i].device_capability, pad_settings[i].device_type);
 
-		if (is_ldd_pad)
+		if (pad_settings[i].is_ldd_pad)
 		{
-			InitLddPad(pad_settings[i].ldd_handle);
+			InitLddPad(i, &pad_settings[i].port_status);
 		}
-		else if (!cur_pad_handler->bindPadToDevice(m_pads[i], i))
+		else
 		{
-			// Failed to bind the device to cur_pad_handler so binds to NullPadHandler
-			input_log.error("Failed to bind device %s to handler %s", g_cfg_input.player[i]->device.to_string(), handler_type);
-			nullpad->bindPadToDevice(m_pads[i], i);
-		}
+			if (!cur_pad_handler->bindPadToDevice(m_pads[i], i))
+			{
+				// Failed to bind the device to cur_pad_handler so binds to NullPadHandler
+				input_log.error("Failed to bind device '%s' to handler %s. Falling back to NullPadHandler.", cfg->device.to_string(), handler_type);
+				nullpad->bindPadToDevice(m_pads[i], i);
+			}
 
-		input_log.notice("Pad %d: %s", i, g_cfg_input.player[i]->device.to_string());
+			input_log.notice("Pad %d: device='%s', handler=%s, VID=0x%x, PID=0x%x, class_type=0x%x, class_profile=0x%x",
+				i, cfg->device.to_string(), m_pads[i]->m_pad_handler, m_pads[i]->m_vendor_id, m_pads[i]->m_product_id, m_pads[i]->m_class_type, m_pads[i]->m_class_profile);
+		}
 	}
 }
 
-void pad_thread::SetRumble(const u32 pad, u8 largeMotor, bool smallMotor)
+void pad_thread::SetRumble(const u32 pad, u8 large_motor, bool small_motor)
 {
 	if (pad >= m_pads.size())
 		return;
 
 	if (m_pads[pad]->m_vibrateMotors.size() >= 2)
 	{
-		m_pads[pad]->m_vibrateMotors[0].m_value = largeMotor;
-		m_pads[pad]->m_vibrateMotors[1].m_value = smallMotor ? 255 : 0;
+		m_pads[pad]->m_vibrateMotors[0].m_value = large_motor;
+		m_pads[pad]->m_vibrateMotors[1].m_value = small_motor ? 255 : 0;
 	}
 }
 
@@ -270,7 +278,7 @@ void pad_thread::operator()()
 						continue;
 					}
 
-					handler->ThreadProc();
+					handler->process();
 
 					thread_ctrl::wait_for(g_cfg.io.pad_sleep);
 				}
@@ -317,7 +325,7 @@ void pad_thread::operator()()
 		{
 			for (auto& handler : handlers)
 			{
-				handler.second->ThreadProc();
+				handler.second->process();
 				connected_devices += handler.second->connected_devices;
 			}
 		}
@@ -373,21 +381,19 @@ void pad_thread::operator()()
 	stop_threads();
 }
 
-void pad_thread::InitLddPad(u32 handle)
+void pad_thread::InitLddPad(u32 handle, const u32* port_status)
 {
 	if (handle >= m_pads.size())
 	{
 		return;
 	}
 
-	input_log.notice("Pad %d: LDD", handle);
-
-	static const auto product = input::get_product_info(input::product_type::playstation_3_controller);
+	static const input::product_info product = input::get_product_info(input::product_type::playstation_3_controller);
 
 	m_pads[handle]->ldd = true;
 	m_pads[handle]->Init
 	(
-		CELL_PAD_STATUS_CONNECTED | CELL_PAD_STATUS_ASSIGN_CHANGES | CELL_PAD_STATUS_CUSTOM_CONTROLLER,
+		port_status ? *port_status : CELL_PAD_STATUS_CONNECTED | CELL_PAD_STATUS_ASSIGN_CHANGES | CELL_PAD_STATUS_CUSTOM_CONTROLLER,
 		CELL_PAD_CAPABILITY_PS3_CONFORMITY,
 		CELL_PAD_DEV_TYPE_LDD,
 		0, // CELL_PAD_PCLASS_TYPE_STANDARD
@@ -396,6 +402,9 @@ void pad_thread::InitLddPad(u32 handle)
 		product.product_id,
 		50
 	);
+
+	input_log.notice("Pad %d: LDD, VID=0x%x, PID=0x%x, class_type=0x%x, class_profile=0x%x",
+		handle, m_pads[handle]->m_vendor_id, m_pads[handle]->m_product_id, m_pads[handle]->m_class_type, m_pads[handle]->m_class_profile);
 
 	num_ldd_pad++;
 }
@@ -407,7 +416,7 @@ s32 pad_thread::AddLddPad()
 	{
 		if (g_cfg_input.player[i]->handler == pad_handler::null && !m_pads[i]->ldd)
 		{
-			InitLddPad(i);
+			InitLddPad(i, nullptr);
 			return i;
 		}
 	}
@@ -460,35 +469,6 @@ void pad_thread::InitPadConfig(cfg_pad& cfg, pad_handler type, std::shared_ptr<P
 		handler = GetHandler(type);
 	}
 
-	switch (handler->m_type)
-	{
-	case pad_handler::null:
-		static_cast<NullPadHandler*>(handler.get())->init_config(&cfg);
-		break;
-	case pad_handler::keyboard:
-		static_cast<keyboard_pad_handler*>(handler.get())->init_config(&cfg);
-		break;
-	case pad_handler::ds3:
-		static_cast<ds3_pad_handler*>(handler.get())->init_config(&cfg);
-		break;
-	case pad_handler::ds4:
-		static_cast<ds4_pad_handler*>(handler.get())->init_config(&cfg);
-		break;
-	case pad_handler::dualsense:
-		static_cast<dualsense_pad_handler*>(handler.get())->init_config(&cfg);
-		break;
-#ifdef _WIN32
-	case pad_handler::xinput:
-		static_cast<xinput_pad_handler*>(handler.get())->init_config(&cfg);
-		break;
-	case pad_handler::mm:
-		static_cast<mm_joystick_handler*>(handler.get())->init_config(&cfg);
-		break;
-#endif
-#ifdef HAVE_LIBEVDEV
-	case pad_handler::evdev:
-		static_cast<evdev_joystick_handler*>(handler.get())->init_config(&cfg);
-		break;
-#endif
-	}
+	ensure(!!handler);
+	handler->init_config(&cfg);
 }

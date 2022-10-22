@@ -420,11 +420,11 @@ const std::array<std::pair<ppu_intrp_func_t, std::string_view>, 1024> g_ppu_sysc
 	BIND_SYSC(sys_uart_send),                               //369 (0x171)  ROOT
 	BIND_SYSC(sys_uart_get_params),                         //370 (0x172)  ROOT
 	uns_func,                                               //371 (0x173)  UNS
-	NULL_FUNC(sys_game_watchdog_start),                     //372 (0x174)
-	NULL_FUNC(sys_game_watchdog_stop),                      //373 (0x175)
-	NULL_FUNC(sys_game_watchdog_clear),                     //374 (0x176)
+	BIND_SYSC(_sys_game_watchdog_start),                     //372 (0x174)
+	BIND_SYSC(_sys_game_watchdog_stop),                      //373 (0x175)
+	BIND_SYSC(_sys_game_watchdog_clear),                     //374 (0x176)
 	NULL_FUNC(sys_game_set_system_sw_version),              //375 (0x177)  ROOT
-	NULL_FUNC(sys_game_get_system_sw_version),              //376 (0x178)  ROOT
+	BIND_SYSC(_sys_game_get_system_sw_version),              //376 (0x178)  ROOT
 	NULL_FUNC(sys_sm_set_shop_mode),                        //377 (0x179)  ROOT
 	BIND_SYSC(sys_sm_get_ext_event2),                       //378 (0x17A)  ROOT
 	BIND_SYSC(sys_sm_shutdown),                             //379 (0x17B)  ROOT
@@ -1605,8 +1605,12 @@ void lv2_obj::schedule_all(u64 current_time)
 			if (target->state & cpu_flag::suspend)
 			{
 				ppu_log.trace("schedule(): %s", target->id);
-				target->state.atomic_op(FN(x += cpu_flag::signal, x -= cpu_flag::suspend));
 				target->start_time = 0;
+
+				if ((target->state.fetch_op(FN(x += cpu_flag::signal, x -= cpu_flag::suspend, void())) & (cpu_flag::wait + cpu_flag::signal)) != cpu_flag::wait)
+				{
+					continue;
+				}
 
 				if (notify_later_idx == std::size(g_to_notify))
 				{
