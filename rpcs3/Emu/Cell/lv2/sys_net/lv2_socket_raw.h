@@ -8,6 +8,7 @@ public:
 	lv2_socket_raw(lv2_socket_family family, lv2_socket_type type, lv2_ip_protocol protocol);
 	lv2_socket_raw(utils::serial& ar, lv2_socket_type type);
 	void save(utils::serial& ar);
+	~lv2_socket_raw();
 
 	std::tuple<bool, s32, std::shared_ptr<lv2_socket>, sys_net_sockaddr> accept(bool is_lock = true) override;
 	s32 bind(const sys_net_sockaddr& addr) override;

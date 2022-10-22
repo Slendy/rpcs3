@@ -89,7 +89,7 @@ sys_net_error get_last_error(bool is_blocking, int native_error)
 		ERROR_CASE(EHOSTDOWN);
 		ERROR_CASE(EHOSTUNREACH);
 	default:
-		fmt::throw_exception("sys_net get_last_error(is_blocking=%d, native_error=%d): Unknown/illegal socket error", is_blocking, native_error);
+		sys_net.todo("sys_net get_last_error(is_blocking=%d, native_error=%d): Unknown/illegal socket error", is_blocking, native_error);
 	}
 
 	if (name && result != SYS_NET_EWOULDBLOCK && result != SYS_NET_EINPROGRESS)
